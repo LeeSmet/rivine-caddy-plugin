@@ -1,4 +1,4 @@
-package main
+package reb 
 
 import (
 	"github.com/caddyserver/caddy"
