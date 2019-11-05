@@ -15,13 +15,11 @@
 package reb
 
 import (
-	"bytes"
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
-	"log"
 	"net"
 	"net/http"
 	"net/textproto"
@@ -601,74 +599,56 @@ func (u *staticUpstream) resolveHost(h string) ([]string, bool, error) {
 }
 
 func (u *staticUpstream) healthCheck() {
+	heightMap := make(map[uint64]uint8)
+	hostMap := make(map[*UpstreamHost]uint64)
+
 	for _, host := range u.Hosts {
-		candidates, isSrv, err := u.resolveHost(host.Name)
+		fmt.Printf("Checking host %v/explorer\n", host.Name)
+		resp, err := http.Get(fmt.Sprintf("%v/explorer", host.Name))
+
 		if err != nil {
 			host.HealthCheckResult.Store(err.Error())
 			atomic.StoreInt32(&host.Unhealthy, 1)
 			continue
 		}
+		defer resp.Body.Close()
 
-		unhealthyCount := 0
-		for _, addr := range candidates {
-			hostURL := addr
-			if !isSrv && u.HealthCheck.Port != "" {
-				hostURL = replacePort(hostURL, u.HealthCheck.Port)
-			}
-			hostURL += u.HealthCheck.Path
-
-			unhealthy := func() bool {
-				// set up request, needed to be able to modify headers
-				// possible errors are bad HTTP methods or un-parsable urls
-				req, err := http.NewRequest("GET", hostURL, nil)
-				if err != nil {
-					return true
-				}
-				// set host for request going upstream
-				if u.HealthCheck.Host != "" {
-					req.Host = u.HealthCheck.Host
-				}
-				r, err := u.HealthCheck.Client.Do(req)
-				if err != nil {
-					return true
-				}
-				defer func() {
-					if _, err := io.Copy(ioutil.Discard, r.Body); err != nil {
-						log.Println("[ERROR] failed to copy: ", err)
-					}
-					_ = r.Body.Close()
-				}()
-				if r.StatusCode < 200 || r.StatusCode >= 400 {
-					return true
-				}
-				if u.HealthCheck.ContentString == "" { // don't check for content string
-					return false
-				}
-				// TODO ReadAll will be replaced if deemed necessary
-				//      See https://github.com/caddyserver/caddy/pull/1691
-				buf, err := ioutil.ReadAll(r.Body)
-				if err != nil {
-					return true
-				}
-				if bytes.Contains(buf, []byte(u.HealthCheck.ContentString)) {
-					return false
-				}
-				return true
-			}()
-
-			if unhealthy {
-				unhealthyCount++
-			}
+		parsedResp := struct {
+			Height uint64 `json:"height"`
+		}{}
+		if err = json.NewDecoder(resp.Body).Decode(&parsedResp); err != nil {
+			host.HealthCheckResult.Store(err.Error())
+			atomic.StoreInt32(&host.Unhealthy, 1)
+			continue
 		}
 
-		if unhealthyCount == len(candidates) {
+		heightMap[parsedResp.Height] += 1
+		hostMap[host] = parsedResp.Height
+	}
+
+	var mostCommonHeight uint64
+	var mostCommonHeightCount uint8
+
+	for height, count := range heightMap {
+		if height > mostCommonHeight && count >= mostCommonHeightCount {
+			mostCommonHeight = height
+			mostCommonHeightCount = count
+		}
+	}
+
+	for host, height := range hostMap {
+		if height != mostCommonHeight {
+			fmt.Printf("Host %v unhealthy\n", host.Name)
 			atomic.StoreInt32(&host.Unhealthy, 1)
 			host.HealthCheckResult.Store("Failed")
 		} else {
+			fmt.Printf("Host %v healthy\n", host.Name)
 			atomic.StoreInt32(&host.Unhealthy, 0)
 			host.HealthCheckResult.Store("OK")
 		}
+
 	}
+
 }
 
 func (u *staticUpstream) HealthCheckWorker(stop chan struct{}) {
