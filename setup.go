@@ -15,11 +15,14 @@
 package reb
 
 import (
+	"fmt"
+
 	"github.com/caddyserver/caddy"
 	"github.com/caddyserver/caddy/caddyhttp/httpserver"
 )
 
 func init() {
+	fmt.Println("Initializing rivine explorer plugin")
 	caddy.RegisterPlugin("reb", caddy.Plugin{
 		ServerType: "http",
 		Action:     setup,
